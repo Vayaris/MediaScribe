@@ -372,6 +372,17 @@ button.danger,
   color: #ffffff;
 }
 
+button.compact,
+.button.compact {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.inline-form {
+  margin: 0;
+}
+
 .drop-zone {
   position: relative;
   border: 1px dashed var(--border-strong);
@@ -532,10 +543,20 @@ tr:last-child td {
   gap: 18px;
 }
 
+.admin-hero h1 {
+  font-size: clamp(30px, 4vw, 48px);
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 14px;
+}
+
+.system-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .empty {
@@ -571,6 +592,7 @@ tr:last-child td {
 
   .hero-grid,
   .admin-grid,
+  .system-grid,
   .settings-grid {
     grid-template-columns: 1fr;
   }

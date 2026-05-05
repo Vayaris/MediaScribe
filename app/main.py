@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import html
+import os
 import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import Cookie, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -16,6 +19,17 @@ from .security import hash_password, sign_session, verify_password, verify_sessi
 
 app = FastAPI(title=APP_NAME)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+PARIS_TZ = ZoneInfo("Europe/Paris")
+LANGUAGE_OPTIONS = [
+    ("fr", "Français"),
+    ("en", "Anglais"),
+    ("es", "Espagnol"),
+    ("de", "Allemand"),
+    ("it", "Italien"),
+    ("pt", "Portugais"),
+    ("auto", "Détection automatique"),
+]
 
 
 @app.on_event("startup")
@@ -43,6 +57,80 @@ def status_label(status: str) -> str:
     return labels.get(status, status)
 
 
+def language_label(code: str) -> str:
+    return dict(LANGUAGE_OPTIONS).get(code, code)
+
+
+def format_datetime(value: object) -> str:
+    if not value:
+        return ""
+    raw = str(value)
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return raw
+    return parsed.astimezone(PARIS_TZ).strftime("%d/%m/%y %H:%M:%S")
+
+
+def human_size(size: int | float | None) -> str:
+    if size is None:
+        return "-"
+    return f"{size / (1024 ** 3):.1f} Go"
+
+
+def language_options_html(current: str) -> str:
+    return "".join(
+        f"<option value='{code}' {'selected' if code == current else ''}>{label}</option>"
+        for code, label in LANGUAGE_OPTIONS
+    )
+
+
+def available_models(current_model: str = "") -> list[Path]:
+    models = [path for path in MODEL_DIR.iterdir() if path.is_file() and path.suffix.lower() in {".bin", ".gguf"}]
+    if current_model:
+        current = Path(current_model)
+        if current.exists() and current.suffix.lower() in {".bin", ".gguf"} and current not in models:
+            models.append(current)
+    return sorted(models, key=lambda path: path.name.lower())
+
+
+def model_options_html(current_model: str) -> str:
+    models = available_models(current_model)
+    if not models:
+        return "<option value=''>Aucun modèle trouvé</option>"
+    options = []
+    current_resolved = str(Path(current_model).resolve()) if current_model else ""
+    for path in models:
+        selected = "selected" if str(path.resolve()) == current_resolved else ""
+        label = f"{path.name} - {human_size(path.stat().st_size)}"
+        options.append(f"<option value='{esc(path)}' {selected}>{esc(label)}</option>")
+    return "".join(options)
+
+
+def machine_stats() -> dict[str, str]:
+    meminfo: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            meminfo[key] = int(value.strip().split()[0]) * 1024
+    except Exception:
+        pass
+
+    total_memory = meminfo.get("MemTotal")
+    available_memory = meminfo.get("MemAvailable")
+    used_memory = total_memory - available_memory if total_memory is not None and available_memory is not None else None
+    disk = shutil.disk_usage("/")
+    return {
+        "cpu": str(os.cpu_count() or 1),
+        "ram_total": human_size(total_memory),
+        "ram_used": human_size(used_memory),
+        "ram_available": human_size(available_memory),
+        "disk_total": human_size(disk.total),
+        "disk_used": human_size(disk.used),
+        "disk_free": human_size(disk.free),
+    }
+
+
 def nav_link(path: str, label: str, active: str, key: str) -> str:
     selected = " active" if active == key else ""
     return f"<a class='nav-link{selected}' href='{path}'>{label}</a>"
@@ -51,16 +139,20 @@ def nav_link(path: str, label: str, active: str, key: str) -> str:
 def base_document(title: str, body: str, *, user: dict | None = None, active: str = "", auth: bool = False) -> HTMLResponse:
     nav = ""
     if user:
-        admin = nav_link("/admin", "Admin", active, "admin") if user["role"] == "admin" else ""
+        if user["role"] == "admin":
+            links = nav_link("/admin", "Admin", active, "admin")
+        else:
+            links = f"""
+              {nav_link("/", "Transcrire", active, "transcribe")}
+              {nav_link("/jobs", "Historique", active, "jobs")}
+              {nav_link("/account", "Compte", active, "account")}
+            """
         nav = f"""
-        <nav class="nav" aria-label="Navigation principale">
-          {nav_link("/", "Transcrire", active, "transcribe")}
-          {nav_link("/jobs", "Historique", active, "jobs")}
-          {nav_link("/account", "Compte", active, "account")}
-          {admin}
-          <button class="theme-toggle" type="button" onclick="toggleTheme()">Mode <span data-theme-label>Sombre</span></button>
-          <form class="logout-form" method="post" action="/logout"><button class="logout-button" type="submit">Déconnexion</button></form>
-        </nav>"""
+          <nav class="nav" aria-label="Navigation principale">
+            {links}
+            <button class="theme-toggle" type="button" onclick="toggleTheme()">Mode <span data-theme-label>Sombre</span></button>
+            <form class="logout-form" method="post" action="/logout"><button class="logout-button" type="submit">Déconnexion</button></form>
+          </nav>"""
 
     if auth:
         page = f"<main class='auth-page'>{body}</main>"
@@ -135,10 +227,18 @@ def require_admin(session: str | None = Cookie(default=None)) -> dict:
     return user
 
 
+def require_regular_user(session: str | None = Cookie(default=None)) -> dict:
+    user = require_user(session)
+    if user["role"] == "admin":
+        raise HTTPException(status_code=303, headers={"Location": "/admin"})
+    return user
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str | None = None, session: str | None = Cookie(default=None)):
-    if current_user(session):
-        return RedirectResponse("/", status_code=303)
+    user = current_user(session)
+    if user:
+        return RedirectResponse("/admin" if user["role"] == "admin" else "/", status_code=303)
     message = "Identifiant ou mot de passe incorrect." if error else None
     return auth_card(
         "Connexion",
@@ -164,7 +264,7 @@ def login(username: str = Form(...), password: str = Form(...)) -> RedirectRespo
         row = conn.execute("SELECT * FROM users WHERE username = ? AND enabled = 1", (username.strip(),)).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
         return RedirectResponse("/login?error=1", status_code=303)
-    redirect = RedirectResponse("/", status_code=303)
+    redirect = RedirectResponse("/admin" if row["role"] == "admin" else "/", status_code=303)
     redirect.set_cookie("session", sign_session(row["id"], get_setting("secret_key")), httponly=True, secure=False, samesite="lax")
     return redirect
 
@@ -216,20 +316,9 @@ def register(username: str = Form(...), password: str = Form(...)) -> RedirectRe
 
 @app.get("/", response_class=HTMLResponse)
 def index(session: str | None = Cookie(default=None)) -> HTMLResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     language = get_setting("default_language", "fr")
-    language_options = "".join(
-        f"<option value='{code}' {'selected' if code == language else ''}>{label}</option>"
-        for code, label in [
-            ("fr", "Français"),
-            ("en", "Anglais"),
-            ("es", "Espagnol"),
-            ("de", "Allemand"),
-            ("it", "Italien"),
-            ("pt", "Portugais"),
-            ("auto", "Détection automatique"),
-        ]
-    )
+    language_options = language_options_html(language)
     return base_document(
         "Transcrire",
         f"""
@@ -270,7 +359,7 @@ def index(session: str | None = Cookie(default=None)) -> HTMLResponse:
 
 @app.post("/upload")
 def upload(file: UploadFile = File(...), language: str = Form("fr"), session: str | None = Cookie(default=None)) -> RedirectResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file extension")
@@ -297,31 +386,45 @@ def upload(file: UploadFile = File(...), language: str = Form("fr"), session: st
 
 @app.get("/jobs", response_class=HTMLResponse)
 def jobs(session: str | None = Cookie(default=None)) -> HTMLResponse:
-    user = require_user(session)
-    if user["role"] == "admin":
-        query = "SELECT j.*, u.username FROM transcription_jobs j JOIN users u ON u.id = j.user_id ORDER BY j.created_at DESC"
-        params = ()
-    else:
-        query = "SELECT j.*, u.username FROM transcription_jobs j JOIN users u ON u.id = j.user_id WHERE j.user_id = ? ORDER BY j.created_at DESC"
-        params = (user["id"],)
+    user = require_regular_user(session)
+    query = """
+        SELECT
+            j.*,
+            u.username,
+            (
+                SELECT COUNT(*)
+                FROM transcription_jobs j2
+                WHERE j2.user_id = j.user_id
+                  AND (j2.created_at < j.created_at OR (j2.created_at = j.created_at AND j2.id <= j.id))
+            ) AS user_job_number
+        FROM transcription_jobs j
+        JOIN users u ON u.id = j.user_id
+        WHERE j.user_id = ?
+        ORDER BY j.created_at DESC, j.id DESC
+    """
+    params = (user["id"],)
     with connect() as conn:
         rows = conn.execute(query, params).fetchall()
     if rows:
         lines = "".join(
             f"""
             <tr>
-              <td><a href="/jobs/{row['id']}">#{row['id']}</a></td>
+              <td><a href="/jobs/{row['id']}">#{row['user_job_number']}</a></td>
               <td>{esc(row['original_filename'])}</td>
-              <td>{esc(row['username'])}</td>
               <td><span class="status {status_class(row['status'])}">{esc(status_label(row['status']))}</span></td>
-              <td>{esc(row['created_at'])}</td>
+              <td>{esc(format_datetime(row['created_at']))}</td>
+              <td>
+                <form class="inline-form" method="post" action="/jobs/{row['id']}/delete">
+                  <button class="danger compact" type="submit">Supprimer</button>
+                </form>
+              </td>
             </tr>"""
             for row in rows
         )
         content = f"""
         <div class="table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>Fichier</th><th>Utilisateur</th><th>Statut</th><th>Date</th></tr></thead>
+            <thead><tr><th>ID</th><th>Fichier</th><th>Statut</th><th>Date</th><th>Action</th></tr></thead>
             <tbody>{lines}</tbody>
           </table>
         </div>"""
@@ -332,10 +435,24 @@ def jobs(session: str | None = Cookie(default=None)) -> HTMLResponse:
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_detail(job_id: int, session: str | None = Cookie(default=None)) -> HTMLResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     with connect() as conn:
-        row = conn.execute("SELECT * FROM transcription_jobs WHERE id = ?", (job_id,)).fetchone()
-    if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
+        row = conn.execute(
+            """
+            SELECT
+                j.*,
+                (
+                    SELECT COUNT(*)
+                    FROM transcription_jobs j2
+                    WHERE j2.user_id = j.user_id
+                      AND (j2.created_at < j.created_at OR (j2.created_at = j.created_at AND j2.id <= j.id))
+                ) AS user_job_number
+            FROM transcription_jobs j
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if not row or row["user_id"] != user["id"]:
         raise HTTPException(status_code=404)
     refresh = "<meta http-equiv='refresh' content='5'>" if row["status"] in {"queued", "running"} else ""
     transcript = esc(row["transcript_text"] or "")
@@ -343,12 +460,12 @@ def job_detail(job_id: int, session: str | None = Cookie(default=None)) -> HTMLR
     download = f"<a class='button secondary' href='/jobs/{job_id}/download.txt'>Télécharger TXT</a>" if row["status"] == "completed" else ""
     body = f"""{refresh}
         <section class="panel">
-          <h2>Transcription #{job_id}</h2>
+          <h2>Transcription #{row['user_job_number']}</h2>
           <div class="job-meta">
             <div class="meta-item"><span>Fichier</span><strong>{esc(row['original_filename'])}</strong></div>
             <div class="meta-item"><span>Statut</span><strong><span class="status {status_class(row['status'])}">{esc(status_label(row['status']))}</span></strong></div>
-            <div class="meta-item"><span>Langue</span><strong>{esc(row['language'])}</strong></div>
-            <div class="meta-item"><span>Créé</span><strong>{esc(row['created_at'])}</strong></div>
+            <div class="meta-item"><span>Langue</span><strong>{esc(language_label(row['language']))}</strong></div>
+            <div class="meta-item"><span>Créé</span><strong>{esc(format_datetime(row['created_at']))}</strong></div>
           </div>
           {error}
           <label>Texte transcrit</label>
@@ -365,10 +482,10 @@ def job_detail(job_id: int, session: str | None = Cookie(default=None)) -> HTMLR
 
 @app.get("/jobs/{job_id}/download.txt")
 def download(job_id: int, session: str | None = Cookie(default=None)) -> PlainTextResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     with connect() as conn:
         row = conn.execute("SELECT * FROM transcription_jobs WHERE id = ?", (job_id,)).fetchone()
-    if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
+    if not row or row["user_id"] != user["id"]:
         raise HTTPException(status_code=404)
     headers = {"Content-Disposition": f'attachment; filename="transcription-{job_id}.txt"'}
     return PlainTextResponse(row["transcript_text"] or "", headers=headers)
@@ -376,10 +493,10 @@ def download(job_id: int, session: str | None = Cookie(default=None)) -> PlainTe
 
 @app.post("/jobs/{job_id}/delete")
 def delete_job(job_id: int, session: str | None = Cookie(default=None)) -> RedirectResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     with connect() as conn:
         row = conn.execute("SELECT * FROM transcription_jobs WHERE id = ?", (job_id,)).fetchone()
-        if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
+        if not row or row["user_id"] != user["id"]:
             raise HTTPException(status_code=404)
         Path(row["media_path"]).unlink(missing_ok=True)
         if row["transcript_path"]:
@@ -390,7 +507,7 @@ def delete_job(job_id: int, session: str | None = Cookie(default=None)) -> Redir
 
 @app.get("/account", response_class=HTMLResponse)
 def account(error: str | None = None, session: str | None = Cookie(default=None)) -> HTMLResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     error_html = "<p class='error'>Le mot de passe doit contenir au moins 8 caractères.</p>" if error else ""
     return base_document(
         "Compte",
@@ -413,7 +530,7 @@ def account(error: str | None = None, session: str | None = Cookie(default=None)
 
 @app.post("/account/password")
 def account_password(password: str = Form(...), session: str | None = Cookie(default=None)) -> RedirectResponse:
-    user = require_user(session)
+    user = require_regular_user(session)
     if len(password) < 8:
         return RedirectResponse("/account?error=short", status_code=303)
     with connect() as conn:
@@ -438,25 +555,44 @@ def admin(session: str | None = Cookie(default=None)) -> HTMLResponse:
         </tr>"""
         for row in users
     )
-    disk = shutil.disk_usage("/")
+    stats = machine_stats()
+    current_model = settings.get("model_path", "")
+    current_model_path = Path(current_model) if current_model else None
+    current_model_label = current_model_path.name if current_model_path else "Aucun modèle"
+    current_model_size = human_size(current_model_path.stat().st_size) if current_model_path and current_model_path.exists() else "-"
     body = f"""
+        <section class="panel admin-hero">
+          <p class="eyebrow">Administration</p>
+          <h1>Paramètres MediaScribe</h1>
+          <p class="lede">Pilotez le modèle, la langue par défaut, les utilisateurs et l'état de la machine depuis cet espace dédié.</p>
+        </section>
         <div class="admin-grid">
           <section class="panel">
             <p class="eyebrow">Configuration</p>
             <h2>Paramètres de transcription</h2>
             <form method="post" action="/admin/settings">
               <div class="settings-grid">
-                <div><label>Langue par défaut</label><input name="default_language" value="{esc(settings.get('default_language'))}"></div>
+                <div><label>Langue par défaut</label><select name="default_language" required>{language_options_html(settings.get('default_language', 'fr'))}</select></div>
                 <div><label>Taille max upload MB</label><input name="max_upload_mb" type="number" min="1" value="{esc(settings.get('max_upload_mb'))}"></div>
                 <div><label>Jobs simultanés</label><input name="max_concurrent_jobs" type="number" min="1" value="{esc(settings.get('max_concurrent_jobs'))}"></div>
                 <div><label>Binaire whisper.cpp</label><input name="whisper_binary" value="{esc(settings.get('whisper_binary'))}"></div>
               </div>
-              <label>Chemin modèle</label>
-              <input name="model_path" value="{esc(settings.get('model_path'))}">
+              <label>Modèle actif</label>
+              <select name="model_path" required>{model_options_html(current_model)}</select>
+              <p class="field-help">Actuel : {esc(current_model_label)} ({esc(current_model_size)}) - {esc(current_model)}</p>
               <div class="actions"><button type="submit">Enregistrer</button></div>
             </form>
           </section>
           <div>
+            <section class="panel">
+              <p class="eyebrow">Sécurité</p>
+              <h2>Mot de passe admin</h2>
+              <form method="post" action="/admin/password">
+                <label>Nouveau mot de passe</label>
+                <input name="password" type="password" required minlength="8" autocomplete="new-password">
+                <div class="actions"><button type="submit">Changer le mot de passe</button></div>
+              </form>
+            </section>
             <section class="panel">
               <p class="eyebrow">Modèle local</p>
               <h2>Uploader un modèle</h2>
@@ -474,10 +610,15 @@ def admin(session: str | None = Cookie(default=None)) -> HTMLResponse:
             <section class="panel">
               <p class="eyebrow">Machine</p>
               <h2>État système</h2>
-              <div class="stat-row">
-                <div class="stat"><strong>{disk.free // (1024 ** 3)} GB</strong><span>Disque libre</span></div>
-                <div class="stat"><strong>{disk.total // (1024 ** 3)} GB</strong><span>Disque total</span></div>
-                <div class="stat"><strong>{esc(settings.get('default_language'))}</strong><span>Langue</span></div>
+              <div class="system-grid">
+                <div class="stat"><strong>{esc(stats['cpu'])}</strong><span>Coeurs CPU</span></div>
+                <div class="stat"><strong>{esc(stats['ram_total'])}</strong><span>RAM totale</span></div>
+                <div class="stat"><strong>{esc(stats['ram_used'])}</strong><span>RAM utilisée</span></div>
+                <div class="stat"><strong>{esc(stats['ram_available'])}</strong><span>RAM disponible</span></div>
+                <div class="stat"><strong>{esc(stats['disk_total'])}</strong><span>Stockage total</span></div>
+                <div class="stat"><strong>{esc(stats['disk_used'])}</strong><span>Stockage utilisé</span></div>
+                <div class="stat"><strong>{esc(stats['disk_free'])}</strong><span>Stockage restant</span></div>
+                <div class="stat"><strong>{esc(language_label(settings.get('default_language', 'fr')))}</strong><span>Langue active</span></div>
               </div>
             </section>
           </div>
@@ -504,14 +645,28 @@ def admin_settings(
     session: str | None = Cookie(default=None),
 ) -> RedirectResponse:
     require_admin(session)
+    if default_language not in dict(LANGUAGE_OPTIONS):
+        default_language = "fr"
+    selected_model = Path(model_path)
+    if selected_model.suffix.lower() not in {".bin", ".gguf"} or not selected_model.exists():
+        selected_model = Path(get_setting("model_path"))
     for key, value in {
         "default_language": default_language,
-        "model_path": model_path,
+        "model_path": str(selected_model),
         "whisper_binary": whisper_binary,
         "max_upload_mb": max_upload_mb,
         "max_concurrent_jobs": max_concurrent_jobs,
     }.items():
         set_setting(key, value.strip())
+    return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/password")
+def admin_password(password: str = Form(...), session: str | None = Cookie(default=None)) -> RedirectResponse:
+    user = require_admin(session)
+    if len(password) >= 8:
+        with connect() as conn:
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), user["id"]))
     return RedirectResponse("/admin", status_code=303)
 
 
