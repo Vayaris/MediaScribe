@@ -98,19 +98,14 @@ a {
 
 .logo-crop img {
   display: block;
-  max-width: none;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 
 .brand-logo {
   width: 238px;
-  height: 78px;
-}
-
-.brand-logo img {
-  width: 238px;
-  height: 238px;
-  transform: translateY(-84px);
+  height: 52px;
 }
 
 .brand-wordmark {
@@ -186,15 +181,10 @@ a {
 }
 
 .auth-logo {
-  width: 300px;
-  height: 96px;
+  width: 320px;
+  max-width: 100%;
+  height: 86px;
   margin: 0 auto 24px;
-}
-
-.auth-logo img {
-  width: 300px;
-  height: 300px;
-  transform: translateY(-106px);
 }
 
 .auth-title {
@@ -609,13 +599,7 @@ tr:last-child td {
 
   .brand-logo {
     width: 205px;
-    height: 68px;
-  }
-
-  .brand-logo img {
-    width: 205px;
-    height: 205px;
-    transform: translateY(-72px);
+    height: 45px;
   }
 
   .nav-link,
