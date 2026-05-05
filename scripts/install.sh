@@ -17,7 +17,7 @@ apt-get install -y python3 python3-venv python3-pip ffmpeg build-essential cmake
 
 id -u "${APP_USER}" >/dev/null 2>&1 || useradd --system --home "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}"
 
-mkdir -p "${BASE_DIR}" "${APP_DIR}" "${BASE_DIR}/models" "${DATA_DIR}/uploads" "${DATA_DIR}/transcripts"
+mkdir -p "${BASE_DIR}" "${APP_DIR}" "${BASE_DIR}/models" "${DATA_DIR}/uploads" "${DATA_DIR}/transcripts" "${DATA_DIR}/live" "${DATA_DIR}/exports"
 rsync -a --delete --exclude '.venv' --exclude 'data' ./ "${APP_DIR}/"
 
 python3 -m venv "${APP_DIR}/.venv"

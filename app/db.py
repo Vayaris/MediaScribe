@@ -42,15 +42,57 @@ def init_db() -> None:
                 transcript_path TEXT,
                 language TEXT NOT NULL,
                 model_path TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'upload',
+                live_session_id TEXT,
                 status TEXT NOT NULL,
+                progress_percent INTEGER NOT NULL DEFAULT 0,
+                progress_stage TEXT,
+                media_duration_seconds REAL,
+                processed_seconds REAL,
                 transcript_text TEXT,
                 error TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 started_at TEXT,
                 finished_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS live_sessions (
+                id TEXT PRIMARY KEY,
+                job_id INTEGER NOT NULL REFERENCES transcription_jobs(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                language TEXT NOT NULL,
+                model_path TEXT NOT NULL,
+                final_media_path TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                stopped_at TEXT,
+                finished_at TEXT,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS live_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                chunk_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                transcript_text TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at TEXT,
+                finished_at TEXT,
+                UNIQUE(session_id, sequence)
+            );
             """
         )
+        _ensure_column(conn, "transcription_jobs", "source_type", "TEXT NOT NULL DEFAULT 'upload'")
+        _ensure_column(conn, "transcription_jobs", "live_session_id", "TEXT")
+        _ensure_column(conn, "transcription_jobs", "progress_percent", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "transcription_jobs", "progress_stage", "TEXT")
+        _ensure_column(conn, "transcription_jobs", "media_duration_seconds", "REAL")
+        _ensure_column(conn, "transcription_jobs", "processed_seconds", "REAL")
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, value))
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('secret_key', ?)", (new_secret(),))
@@ -64,6 +106,12 @@ def init_db() -> None:
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -83,4 +131,3 @@ def set_setting(key: str, value: str) -> None:
             "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-
