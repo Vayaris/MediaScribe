@@ -1,0 +1,6 @@
+https://127.0.0.1, https://localhost {
+	tls internal
+	reverse_proxy 127.0.0.1:8000
+}
+
+# The installer writes an additional site block for the machine IP.

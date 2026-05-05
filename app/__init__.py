@@ -1,0 +1,2 @@
+"""MediaScribe application package."""
+

@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaScribe transcription worker
+After=network.target mediascribe.service
+
+[Service]
+User=mediascribe
+Group=mediascribe
+WorkingDirectory=/opt/mediascribe/app
+Environment=MEDIASCRIBE_DATA_DIR=/var/lib/mediascribe
+Environment=MEDIASCRIBE_MODEL_DIR=/opt/mediascribe/models
+ExecStart=/opt/mediascribe/app/.venv/bin/python -m app.worker
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
